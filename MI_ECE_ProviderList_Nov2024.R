@@ -1,10 +1,9 @@
-# I am getting data from 6 different sources, gsq_nov24, lara_cap, lara_activ (age ranges, license status), cdc, gsrp, hs  
-# update on Sep 
-
+# I am getting data from 6 different sources, gsq_nov24, lara_cap (capacity), lara_activ (age ranges, license status), cdc, gsrp, hs  
 
 # if(!require(leaflet)) install.packages("leaflet") 
 library(readxl)
 library(dplyr)
+library(tidyr)
 library(stringr)
 library(fuzzyjoin)
 library(stringdist)
@@ -32,6 +31,8 @@ names(gsq_nov24)
 
 unique(gsq_nov24$Status) # all providers seem to be in active status
 # [1] "Active"
+
+length(unique(gsq_nov24$License)) # 7917 of 7917
 
 # manually correct this lic no.
 gsq_nov24[gsq_nov24$License=="tribalc1194076", "License"] <- "TribalC1194076"
@@ -134,7 +135,7 @@ head(laraCap_nojoin)
 
 
 #### CDC from Nov 2024 - 4101 prov
-# some error here: "Count of Children Age 6" is that actual total Child Count. Do not use the field, "Total Child Count" 
+# some error here: "Count of Children Age 6" is the actual total Child Count. Do not use the field, "Total Child Count" 
 cdc = read_excel("E:/2024_Nov27_Received/Raw Data/CDC Data Report - IFF Data as of 11.13.24.xlsx", col_names = T, trim_ws = T)
 names(cdc)
 # [1] "Provider ID"                "Registered License Number"  "Provider Type"              "Provider/Organization Name" "Other Last Name"           
@@ -198,13 +199,13 @@ cdc_nojoin = cdc1[!cdc1$`Registered License Number` %in% gsq_laraCapActiv$Licens
 # gsrp <- gsrp %>%
 #   mutate(`License #` = ifelse(is.na(`License #`), `Tribal #`, `License #`))
 
-#### using GSRP data from Aug 2024 because the above dataset does not have enrollment estimates per license ID - the enrollment is only per sub-recipient 
+#### using GSRP data received in Aug 2024 because the above dataset does not have enrollment estimates per license ID - the enrollment is only per sub-recipient 
 gsrp_aug2024 = read_excel("E:/2024_Aug22_Received/Raw Data/GSRP May 11 2024 Spring for IFF (08.29.24).xlsx", col_names = T, trim_ws = T)
 names(gsrp_aug2024)
 # [1] "License #"         "Actual Enrollment" "Fiscal Agent"      "Site Name"         "Street Address"    "City"             
 # [7] "Zip Code"          "County" 
 
-# 1313 GSRP providers
+# 1313 GSRP providers - all have enrollment estimates
 table(is.na(gsrp_aug2024$`Actual Enrollment`))
 # FALSE 
 # 1313 
@@ -297,25 +298,242 @@ hs2 = left_join(hs1_merged, hs1[,c("Address Line 1","City","ZIP","County","Progr
 # check duplicates - 0
 hsDup = hs2[duplicated(hs2$`Address Line 1`),]
 
+# --- Address Standardization Function ---
+# This function centralizes the address cleaning logic, making it reusable and consistent.
+standardize_address <- function(address_vector) {
+  # Convert to uppercase, remove punctuation, standardize common terms, and trim whitespace.
+  address_vector %>%
+    str_to_upper() %>%
+    str_replace_all("[[:punct:]]", "") %>%
+    str_replace_all("\\b(ST|STR)\\b", "STREET") %>%
+    str_replace_all("\\b(AVE|AV)\\b", "AVENUE") %>%
+    str_replace_all("\\bDR\\b", "DRIVE") %>%
+    str_replace_all("\\bRD\\b", "ROAD") %>%
+    str_replace_all("\\bTRL\\b", "TRAIL") %>%
+    str_replace_all("\\bLN\\b", "LANE") %>%    
+    str_replace_all("\\bPL\\b", "PLACE") %>% 
+    str_replace_all("\\bCIR\\b", "CIRCLE") %>% 
+    str_replace_all("\\bPKWY\\b", "PARKWAY") %>%  
+    str_replace_all("\\bHWY\\b", "HIGHWAY") %>%      
+    str_replace_all("\\bN\\b|\\bNORTH\\b", "N") %>%
+    str_replace_all("\\bS\\b|\\bSOUTH\\b", "S") %>%
+    str_replace_all("\\bE\\b|\\bEAST\\b", "E") %>%
+    str_replace_all("\\bW\\b|\\bWEST\\b", "W") 
+  #  %>% str_squish() # Removes leading/trailing and repeated internal whitespace
+}
+
 ### try joining based on uniq id (street address (6 char), city (4 char) and zip (5 char))
 # excluding the center name from the equation because HS data is using generic names instead of the actual provider names for the centers
 # create uniq ids
-hs2$uniqId = paste0(substr(hs2$`Address Line 1`,1,6), substr(hs2$City,1,4), substr(hs2$ZIP,1,5))
-gsrp_cdc_join$uniqId = paste0(substr(gsrp_cdc_join$Address,1,6), substr(gsrp_cdc_join$City,1,4), substr(gsrp_cdc_join$Zip,1,5))
+
+hs2 <- hs2 %>%
+  # Create a robust join key using the standardization function
+  mutate(
+    address_clean = standardize_address(`Address Line 1`),
+    city_clean = str_to_upper(str_squish(City)),
+    join_key = paste(substr(address_clean,1,6), substr(city_clean,1,4), substr(ZIP,1,4), sep = "|") # 8 + 5 + 4: 447 unique join key in tmp
+  )
+
+gsrp_cdc_join <- gsrp_cdc_join %>%
+  # Create a robust join key using the standardization function
+  mutate(
+    address_clean = standardize_address(Address),
+    city_clean = str_to_upper(str_squish(City)),
+    join_key = paste(substr(address_clean,1,6), substr(city_clean,1,4), substr(Zip,1,4), sep = "|") 
+  )
+
 ################## check why some uniq ids not matching - should have only 4 char from zip 
+# hs2$uniqId = paste0(substr(hs2$`Address Line 1`,1,6), substr(hs2$City,1,4), substr(hs2$ZIP,1,5))
+# gsrp_cdc_join$uniqId = paste0(substr(gsrp_cdc_join$Address,1,6), substr(gsrp_cdc_join$City,1,4), substr(gsrp_cdc_join$Zip,1,5))
 
-# check inner join between hs2 (unique address) and gsrp_cdc_join - 501 of 576 matched - 75 not matched
-tmp = inner_join(hs2, gsrp_cdc_join, join_by(x$uniqId == y$uniqId)) 
-length(unique(tmp$uniqId)) # 397 of 501 unique addresses 
+# check inner join between hs2 (unique address) and gsrp_cdc_join -  - 75 not matched
+length(unique(hs2$address_clean)) # 576 - same for orig address
+length(unique(gsrp_cdc_join$License)) # 7917
+length(unique(gsrp_cdc_join$address_clean)) # changed from orig 7812 to 7720 => less unique addresses
+gsrpDup = gsrp_cdc_join[duplicated(gsrp_cdc_join$join_key),] # 335 (improved address clean, 4 char in zip) vs. 304 (updated join_key) vs 322 (orig)
+
+# orig: 501 of 576 matched vs. address_clean & updated join_key: 601 of 576 - does not make sense - must be duplicate addresses in the base file 
+tmp = inner_join(hs2, gsrp_cdc_join, join_by(x$join_key == y$join_key)) 
+length(unique(tmp$join_key)) # 397 of 501 (orig) vs. 459 of 601 (improved address_clean & updated join_key)
+
+# --- 4. Find High-Confidence Exact Match Pairs ---
+# Join the two datasets by the exact key to find all potential matches - 589 (improved address clean) vs. 601 (improved address clean, 4 char in zip)
+potential_exact_matches <- hs2 %>%
+  inner_join(gsrp_cdc_join, by = "join_key", suffix = c("_hs", "_mi"))
+
+# Apply priority logic and select the best match for each HS location - 452
+exact_match_pairs <- potential_exact_matches %>%
+  mutate(
+    priority = if_else(str_detect(toupper(`Facility Name`), "HEAD START|HEADSTART"), 1, 2)
+  ) %>%
+  group_by(join_key) %>%
+  slice_min(order_by = priority, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  
+  # Select only the key columns that define the successful match
+  select(join_key, License)
+
+cat("Found", nrow(exact_match_pairs), "high-confidence exact matches.\n") # 452 (improved address clean) vs. 459 (with 4 char of zip)
+
+# confirm matches - looks good
+hs_match_toConfirm = tmp[,c("Address Line 1","CenterName","City_hs","ZIP","Facility Name","Program Types","Address","City_mi","Zip")]
+
+# check the number of unique join_key
+length(unique(exact_match_pairs$join_key)) # 459 (both "join_key" & "License" are unique) of 576 (hs2 # prov) - 117 unmatched
+
+# Identify HS and MI providers that are not yet matched
+hs_unmatched <- hs2 %>% filter(!join_key %in% exact_match_pairs$join_key) # 117 of 576 unmatched & 459 matched
+base_file_remaining <- gsrp_cdc_join %>% filter(!License %in% exact_match_pairs$License) # 7458 of 7917 unmatched & 459 matched 
+tmp = base_file_remaining[str_detect(toupper(base_file_remaining$`Facility Name`), "HEAD START|HEADSTART"),] # 41 prov in unmatched base file still have "HEAD START" in their names
 
 
+# --- 5. Find Fuzzy Match Pairs for Remaining Records ---
+cat("Attempting fuzzy matching for", nrow(hs_unmatched), "remaining Head Start records...\n")
+
+# To prevent incorrect cross-city matches, we first create all potential pairs
+# within the same city, and then calculate the address similarity for those pairs.
+if (nrow(hs_unmatched) > 0 && nrow(base_file_remaining) > 0) {
+  potential_fuzzy_matches <- hs_unmatched %>%
+    inner_join(base_file_remaining, by = "city_clean", suffix = c("_hs", "_mi")) %>%
+    mutate(
+      # Jaro-Winkler distance is 1 - similarity. A lower value is a better match.
+      address_dist = stringdist(address_clean_hs, address_clean_mi, method = "jw")
+    ) %>%
+    # Keep only pairs with very high address similarity (low distance).
+    filter(address_dist <= 0.2)
+  
+  # From the potential fuzzy matches, select the best one for each HS location - 56
+  fuzzy_match_pairs <- potential_fuzzy_matches %>%
+    mutate(
+      priority = if_else(str_detect(toupper(`Facility Name`), "HEAD START|HEADSTART"), 1, 2)
+    ) %>%
+    group_by(join_key_hs) %>%
+    # Prioritize by closest address first, then by name as a tie-breaker
+    arrange(address_dist, priority) %>%
+    slice(1) %>%
+    ungroup() %>%
+    # Select and rename the key columns to match the exact pairs format
+    select(join_key = join_key_hs, License)
+} else {
+  # Create an empty tibble if there's nothing to match
+  fuzzy_match_pairs <- tibble(join_key = character(), License = character())
+}
+
+cat("Found", nrow(fuzzy_match_pairs), "additional matches using fuzzy logic.\n") # 56
+
+
+# --- 6. Combine and Reconstruct Final Dataset ---
+
+# Combine the lists of exact and fuzzy matched pairs
+
+# # cross-check fuzzy matching
+checkFuzzyMatch <- fuzzy_match_pairs %>%
+  left_join(hs2, by = "join_key") %>%
+  left_join(gsrp_cdc_join, by = "License", suffix = c("_hs", "_mi"))
+write.csv(checkFuzzyMatch, "E:/2024_Nov27_Received/Processed Data/HS_Manual_Matches.csv", row.names = F)
+
+# after manual check of fuzzy_match_pairs, read the matched records
+matched_fuzzy = read_excel("E:/2024_Nov27_Received/Processed Data/HS_Manual_Matches.xlsx", sheet = "matched", col_names = T, trim_ws = T) %>%
+  select(join_key = join_key_hs, License)
+
+# final HS matched list
+all_matched_pairs <- bind_rows(exact_match_pairs, matched_fuzzy) # 489 = 459 matched + 30 manually matched
+
+# Get the final list of HS prov that were never matched - 87
+hs_unmatched_final <- hs2 %>%
+  filter(!join_key %in% all_matched_pairs$join_key) %>%
+  select(-c("uniqId","address_clean","city_clean","join_key"))
+ 
+# start here
+left join of gsrp_cdc_join & reconstructed_matched_data
+
+# Reconstruct the matched data by joining the pairs back to the original tables - 532
+hs_gsrp_cdc_lara_gsq_join <- all_matched_pairs %>%
+  left_join(hs2, by = "join_key") %>%
+  left_join(gsrp_cdc_join, by = "License", suffix = c("_hs", "_mi")) 
+
+%>%
+  # # Create final Head Start capacity columns, coalescing values from different sources
+  # mutate(
+  #   CapEHS02 = coalesce(EHS, 0),
+  #   CapHS35 = coalesce(HS, 0) + coalesce(`Migrant HS`, 0),
+  #   CapHS05 = CapHS35 + CapEHS02
+  # ) %>%
+  # Select and arrange the final set of columns
+  select(
+    LicNo,
+    ProvName = ProvName_mi,
+    Address = address_clean_oh,
+    City = city_clean_oh,
+    County,
+    State,
+    Zip,
+    LicType,
+    AgeGroup,
+    ProvQual,
+    Cap02,
+    Cap35,
+    Cap05,
+    CapEHS02,
+    CapHS35,
+    CapHS05
+  ) 
+
+# Combine all the pieces: matched data, unmatched OH providers, and unmatched HS locations
+tmp <- bind_rows(reconstructed_matched_data, # 532
+                 final_unmatched_oh, # 6399
+                 final_unmatched_hs)
+
+final_dataset <- bind_rows(reconstructed_matched_data, # 532
+                           final_unmatched_oh, # 6399
+                           final_unmatched_hs) %>% # 76
+  # Replace any remaining NAs in numeric capacity columns with 0
+  mutate(across(starts_with("Cap"), ~ replace_na(., 0)))
+
+
+# --- 7. Final Quality Calculations ---
+# Function to calculate quality-rated capacity slots
+calc_quality_slots <- function(dataset) {
+  # Define input capacity columns and corresponding output quality columns
+  cap_vars <- c("Cap02", "Cap35", "Cap05", "CapEHS02", "CapHS35", "CapHS05")
+  quality_vars <- paste0("Q", cap_vars)
+  for (i in seq_along(cap_vars)) {
+    # If ProvQual is 3, 4, or 5, copy the capacity value; otherwise, set to 0.
+    dataset <- dataset %>%
+      mutate(
+        !!quality_vars[i] := if_else(ProvQual %in% 3:5, .data[[cap_vars[i]]], 0)
+      )
+  }
+  return(dataset)
+}
+
+# Apply the function to the final dataset
+OH_Prov_May2025 <- calc_quality_slots(final_dataset)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+########### orig code #####################
 # final join with hs2 - 7917 prov & 28 fields
 names(gsrp_cdc_join)[2] = "Facility Name"
 hs_gsrp_cdc_join = left_join(gsrp_cdc_join, hs2[,c("uniqId","CenterName","Program","HS","EHS","AIAN EHS","AIAN HS","Migrant HS","Migrant EHS")], join_by(x$uniqId == y$uniqId)) 
 hs_gsrp_cdc_join$uniqId <- NULL
 
 # check the join
-table(is.na(hs_gsrp_cdc_join$CenterName)) # 501 are not NA => 501 gsrp prov joined
+table(is.na(hs_gsrp_cdc_join$CenterName)) # 501 are not NA => 501 HS prov joined
 
 # HS that did not join - 179
 hs2$`formatted_address` = paste0(hs2$`Address Line 1`, ", ", hs2$City, ", MI ", hs2$ZIP) 
@@ -846,17 +1064,88 @@ final_joined = dplyr::bind_rows(noblank_lic, blank_lic1)
 
 # final provider file - 7759
 final_joined <- st_as_sf(final_joined, coords = c("Lon", "Lat"), crs = "EPSG:4326")
+
+names(final_joined)
+# [1] "LicNo"         "ProvName"      "Address"       "City"          "County"        "State"         "Zip"           "LicType"       "AgeGroup"     
+# [10] "ProvQual"      "Cap02"         "Cap35"         "Cap05"         "CapSTSub02"    "CapSTSub35"    "CapSTSub05"    "CapEHS02"      "CapHS35"      
+# [19] "CapHS05"       "CapAianEHS02"  "CapAianHS35"   "CapAianHS05"   "CapMigrEHS02"  "CapMigrHS35"   "CapMigrHS05"   "CapSTSubPreK"  "QCap02"       
+# [28] "QCap35"        "QCap05"        "QCapSTSub02"   "QCapSTSub35"   "QCapSTSub05"   "QCapEHS02"     "QCapHS35"      "QCapHS05"      "QCapAianEHS02"
+# [37] "QCapAianHS35"  "QCapAianHS05"  "QCapMigrEHS02" "QCapMigrHS35"  "QCapMigrHS05"  "QCapSTSubPreK" "Accuracy"      "Accuracy_Type" "geometry"
+
+
+final_joined_small <- final_joined %>%
+  mutate(CapEHS02 = CapEHS02 + CapAianEHS02 + CapMigrEHS02,
+         CapHS35 = CapHS35 + CapAianHS35 + CapMigrHS35,
+         CapHS05 = CapHS05 + CapAianHS05 + CapMigrHS05,
+         QCapEHS02 = QCapEHS02 + QCapAianEHS02 + QCapMigrEHS02,
+         QCapHS35 = QCapHS35 + QCapAianHS35 + QCapMigrHS35,
+         QCapHS05 = QCapHS05 + QCapAianHS05 + QCapMigrHS05,
+         Lat = st_coordinates(.)[,2],
+         Lon = st_coordinates(.)[,1]
+        ) %>%
+  select(
+    LicNo,ProvName,Address,City,County,State,Zip,LicType,AgeGroup,ProvQual,
+    Cap02,Cap35,Cap05,CapSTSub02,CapSTSub35,CapSTSub05,CapEHS02,CapHS35,CapHS05,CapSTSubPreK,
+    QCap02,QCap35,QCap05,QCapSTSub02,QCapSTSub35,QCapSTSub05,QCapEHS02,QCapHS35,QCapHS05,QCapSTSubPreK,
+    Lat,Lon)
+
+
 # Writing 7759 features with 44 fields and geometry type Point
-st_write(final_joined, "E:/2024_Nov27_Received/Final Data/Nov2024.gdb", layer="mi_prov_new", driver="OpenFileGDB", append=FALSE)
-st_write(final_joined, "E:/2024_Nov27_Received/Final Data/Nov2024_new.gpkg", layer="mi_prov_new", append=FALSE)
-write.csv(final_joined, "E:/2024_Nov27_Received/Final Data/miProv_Nov2024.csv", row.names = F)
+# st_write(final_joined, "E:/2024_Nov27_Received/Final Data/Nov2024.gdb", layer="mi_prov_new", driver="OpenFileGDB", append=FALSE) # moved it to archive 
+st_write(final_joined_small, "E:/2024_Nov27_Received/Final Data/Nov2024_new.gpkg", layer="mi_prov_new", append=FALSE)
+write.csv(final_joined_small, "E:/2024_Nov27_Received/Final Data/miProv_Nov2024.csv", row.names = F)
+
+## Nov 14, 2025 - manually edited the E:\2024_Nov27_Received\Final Data\miProv_Nov2024.xlsx - final MI prov = 7581
+# read file
+updatedMiProv = read_excel("E:/2024_Nov27_Received/Final Data/miProv_Nov2024.xlsx", col_names = T, trim_ws = T) # 7581 x 32
+# convert to spatial layer
+updatedMiProv <- st_as_sf(updatedMiProv, coords = c("Lon", "Lat"), crs = "EPSG:4326")
+# write to geopackage
+st_write(updatedMiProv, "E:/2024_Nov27_Received/Final Data/Nov2024_new.gpkg", layer="mi_prov_new", append=FALSE)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 # visualize the points
 ggplot() + 
-  geom_sf(data = final_joined, fill=NA, color="red", size=4)  
+  geom_sf(data = updatedMiProv, fill=NA, color="red", size=4)  
 
 final_df = final_joined
 st_geometry(final_df) = NULL
+
+# summary stats
+summary(final_df[,c(11:42)])
+
+# totals
+totals = apply(final_df[c(11:42)], 2, sum, na.rm=T)
+# Cap02         Cap35         Cap05    CapSTSub02    CapSTSub35    CapSTSub05      CapEHS02       CapHS35       CapHS05  CapAianEHS02   CapAianHS35 
+# 103505.49     235783.51     339289.00      18520.00      33016.00      51536.00       7227.00      20819.00      28046.00        224.00        330.00 
+# CapAianHS05  CapMigrEHS02   CapMigrHS35   CapMigrHS05  CapSTSubPreK        QCap02        QCap35        QCap05   QCapSTSub02   QCapSTSub35   QCapSTSub05 
+# 554.00        286.00       1460.00       1746.00      45742.00      56673.01     134672.99     191346.00      14101.00      25173.00      39274.00 
+# QCapEHS02      QCapHS35      QCapHS05 QCapAianEHS02  QCapAianHS35  QCapAianHS05 QCapMigrEHS02  QCapMigrHS35  QCapMigrHS05 QCapSTSubPreK 
+# 3758.00      12464.00      16222.00         30.00         95.00        125.00        117.00        321.00        438.00      39306.00
+
+final_joined_small_df <- final_joined_small
+st_geometry(final_joined_small_df) = NULL
+totals_small = apply(final_joined_small_df[c(11:30)], 2, sum, na.rm=T)
+# Cap02         Cap35         Cap05       CapSTSub02    CapSTSub35    CapSTSub05      CapEHS02       CapHS35       CapHS05  CapSTSubPreK        QCap02        QCap35 
+# 103505.49     235783.51     339289.00      18520.00      33016.00      51536.00       7737.00      22609.00      30346.00      45742.00      56673.01     134672.99 
+# QCap05       QCapSTSub02   QCapSTSub35   QCapSTSub05     QCapEHS02      QCapHS35      QCapHS05 QCapSTSubPreK 
+# 191346.00      14101.00      25173.00      39274.00       3905.00      12880.00      16785.00      39306.00
 
 ## data quality checks
 check_outliers_and_NAs <- function(df) {
@@ -891,11 +1180,6 @@ check_outliers_and_NAs(final_df)
 
 
 
-# summary stats
-summary(final_df[,c(11:42)])
-
-# totals
-apply(final_df[c(11:42)], 2, median, na.rm=T)
 
 
 # # previous version 
